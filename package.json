@@ -1,0 +1,16 @@
+{
+  "name": "handoff-ledger",
+  "version": "0.1.0",
+  "description": "Phase 1 of the AI handoff memory tool: a lossless, hash-chained, secret-redacting event ledger.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "ledger": "node src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "ai-handoff-ledger",
+  "displayName": "AI Handoff Ledger",
+  "description": "Records who did what in your project (you vs. which AI), whether you approved it, and hands the project's memory to the next AI.",
+  "version": "0.3.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "handoff.switchAi", "title": "Handoff: Switch AI and push memory" },
+      { "command": "handoff.recordDecision", "title": "Handoff: Record a decision" },
+      { "command": "handoff.addRule", "title": "Handoff: Add a hard rule" },
+      { "command": "handoff.addTask", "title": "Handoff: Open a task" },
+      { "command": "handoff.doneTask", "title": "Handoff: Mark a task done" },
+      { "command": "handoff.recordRefusal", "title": "Handoff: Record an AI action I refused" },
+      { "command": "handoff.addGuardrail", "title": "Handoff: Add a guardrail for all AIs" },
+      { "command": "handoff.openContract", "title": "Handoff: Open a task contract (goal, done-when, scope)" },
+      { "command": "handoff.auditContract", "title": "Handoff: Audit a contract (done vs asked vs out of scope)" },
+      { "command": "handoff.wakeAi", "title": "Handoff: Wake an AI (editor or steward)" },
+      { "command": "handoff.sleepAi", "title": "Handoff: Put an AI to sleep" },
+      { "command": "handoff.dispatchTask", "title": "Handoff: Tell the steward what to do (compile prompt and queue)" },
+      { "command": "handoff.reviewProject", "title": "Handoff: Steward review (done vs asked vs scope)" },
+      { "command": "handoff.installMcp", "title": "Handoff: Register the MCP server for this workspace" },
+      { "command": "handoff.openDashboard", "title": "Handoff: Open dashboard" },
+      { "command": "handoff.installClaudeHook", "title": "Handoff: Install Claude Code hook" },
+      { "command": "handoff.verifyLedger", "title": "Handoff: Verify ledger integrity" }
+    ],
+    "configuration": {
+      "title": "AI Handoff Ledger",
+      "properties": {
+        "handoff.ledgerPath": { "type": "string", "default": ".handoff/ledger.jsonl", "description": "Ledger path, relative to the workspace root." },
+        "handoff.humanName": { "type": "string", "default": "", "description": "Your name in the ledger. Defaults to your OS user." },
+        "handoff.knownAis": { "type": "array", "default": ["claude-code", "copilot", "codex", "gemini", "cursor"], "description": "AIs offered in the switch picker." },
+        "handoff.home": { "type": "string", "default": "", "description": "Machine-wide folder for providers, knowledge, projects and the remote password. Empty = ~/.handoff (or $HANDOFF_HOME)." },
+        "handoff.watchFiles": { "type": "boolean", "default": true, "description": "Log file changes. Changes nobody claimed are recorded as 'unknown'." }
+      }
+    }
+  },
+  "files": ["extension.js", "core", "hook"]
+}
