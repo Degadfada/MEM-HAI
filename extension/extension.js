@@ -6,7 +6,9 @@ const fs = require("fs");
 const os = require("os");
 const { pathToFileURL } = require("url");
 
-const IGNORE = /(^|[\\/])(\.git|node_modules|\.handoff|dist|out|build|\.next|\.venv|__pycache__)([\\/]|$)/;
+const IGNORE = /(^|[\\/])(\.git|node_modules|\.handoff|dist|out|build|\.next|\.venv|__pycache__|\.vscode-test|coverage)([\\/]|$)/;
+// Churn that is a side effect of tooling, not work anybody did: lock files, journals, build stamps.
+const NOISE = /(\.(lock|log|tmp|swp|pyc|vsix)$|-(wal|shm|journal)$|(^|[\\/])(\.DS_Store|Thumbs\.db)$)/i;
 const AI_RECENT_MS = 5000; // a hook-logged AI change to the same file within this window claims the file event
 
 let core; // { Ledger, makeBrief, buildVerifiedBrief, startServer, FILENAME }
@@ -17,8 +19,8 @@ const savedByHuman = new Map(); // path -> ts
 async function loadCore(ctx) {
   const dir = path.join(ctx.extensionPath, "core");
   const imp = (f) => import(pathToFileURL(path.join(dir, f)).href);
-  const [l, h, v, s, g, sc, pr, st, kn] = await Promise.all([imp("ledger.js"), imp("handoff.js"), imp("verify.js"), imp("server.js"), imp("guardrails.js"), imp("scope.js"), imp("providers.js"), imp("steward.js"), imp("knowledge.js")]);
-  return { Registry: pr.Registry, dispatch: st.dispatch, review: st.review, KnowledgeStore: kn.KnowledgeStore, addGuardrail: g.addGuardrail, openContract: sc.openContract, liveContracts: sc.liveContracts, audit: sc.audit, Ledger: l.Ledger, makeBrief: h.makeBrief, FILENAME: h.FILENAME, buildVerifiedBrief: v.buildVerifiedBrief, startServer: s.startServer };
+  const [l, h, v, s, g, sc, pr, st, kn, se] = await Promise.all([imp("ledger.js"), imp("handoff.js"), imp("verify.js"), imp("server.js"), imp("guardrails.js"), imp("scope.js"), imp("providers.js"), imp("steward.js"), imp("knowledge.js"), imp("sessions.js")]);
+  return { dayIndex: se.dayIndex, dayReport: se.dayReport, humanDuration: se.humanDuration, localDay: se.localDay, Registry: pr.Registry, dispatch: st.dispatch, review: st.review, KnowledgeStore: kn.KnowledgeStore, addGuardrail: g.addGuardrail, openContract: sc.openContract, liveContracts: sc.liveContracts, audit: sc.audit, Ledger: l.Ledger, makeBrief: h.makeBrief, FILENAME: h.FILENAME, buildVerifiedBrief: v.buildVerifiedBrief, startServer: s.startServer };
 }
 
 const cfg = () => vscode.workspace.getConfiguration("handoff");
@@ -45,9 +47,11 @@ function refreshStatus() {
   } catch (e) { statusItem.text = "$(warning) handoff"; statusItem.tooltip = String(e.message || e); }
 }
 
-function logFileEvent(action, absPath, source, actor) {
+function logFileEvent(action, absPath, source, actor, confidence) {
   const rel = path.relative(root, absPath).split(path.sep).join("/");
-  if (!rel || rel.startsWith("..") || IGNORE.test(rel)) return;
+  if (!rel || rel.startsWith("..") || IGNORE.test(rel) || NOISE.test(rel)) return;
+  // A directory whose mtime moved is not work: it is the parent of something we already logged.
+  try { if (fs.statSync(absPath).isDirectory()) return; } catch { /* gone: a delete, keep it */ }
   const l = open();
   // Was this already attributed to an AI by a hook moments ago? Then don't double count.
   const now = Date.now();
@@ -56,8 +60,19 @@ function logFileEvent(action, absPath, source, actor) {
     if (now - Date.parse(e.ts) > AI_RECENT_MS) break;
     if (e.target === rel && e.actor.kind === "ai") return;
   }
-  l.append({ actor, aiInUse: currentAi() || undefined, action, target: rel, source });
+  l.append({ actor, confidence, aiInUse: currentAi() || undefined, action, target: rel, source });
   refreshStatus();
+}
+
+/**
+ * A change nobody claimed. If you have declared which AI you are driving, attribute it to that AI and
+ * mark the attribution `inferred`: we did not watch it act, we deduced it from what you said is awake.
+ * With no AI declared it stays `unattributed`, because a deduction needs something to deduce from.
+ */
+function attributeUnclaimed(action, absPath) {
+  const ai = currentAi();
+  if (ai) return logFileEvent(action, absPath, "vscode-watch", { kind: "ai", name: ai }, "inferred");
+  return logFileEvent(action, absPath, "vscode-watch", { kind: "unknown", name: "unattributed" }, "unattributed");
 }
 
 function onFsEvent(action, uri) {
@@ -68,7 +83,7 @@ function onFsEvent(action, uri) {
     try {
       const savedAt = savedByHuman.get(p);
       if (savedAt && Date.now() - savedAt < 3000) return; // the save listener already logged it as human
-      logFileEvent(action, p, "vscode-watch", { kind: "unknown", name: "unattributed" });
+      attributeUnclaimed(action, p);
     } catch (e) { console.error("handoff:", e); }
   }, 800));
 }
@@ -239,6 +254,69 @@ function installMcp(ctx) {
   vscode.window.showInformationMessage("MCP server registered for this workspace (.mcp.json for Claude Code, .vscode/mcp.json for VS Code agent mode). Reload the window to pick it up.");
 }
 
+async function showHistory() {
+  const l = open();
+  const days = core.dayIndex(l.all());
+  if (!days.length) return vscode.window.showInformationMessage("No history recorded yet.");
+
+  const pick = await vscode.window.showQuickPick(
+    days.map((d) => ({
+      label: d.date,
+      description: d.events + " action(s)",
+      detail: (d.ais.length ? d.ais : d.actors).join(", "),
+      date: d.date,
+    })),
+    { title: "Which day?", placeHolder: "Pick a day to replay" },
+  );
+  if (!pick) return;
+
+  const r = core.dayReport(l.all(), pick.date, { isReversed: (id) => l.isReversed(id) });
+  const clock = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const out = [];
+  out.push("# " + r.date);
+  out.push("");
+  out.push(r.events + " action(s) in " + r.sessions.length + " session(s).");
+  out.push("");
+  out.push("## Who worked");
+  out.push("");
+  out.push("| who | time | sessions | actions | files |");
+  out.push("| --- | --- | --- | --- | --- |");
+  for (const a of r.byAi)
+    out.push("| " + a.name + " | " + core.humanDuration(a.durationMs) + " | " + a.sessions + " | " + a.events + " | " + a.files + " |");
+  out.push("");
+  out.push("## Sessions");
+  for (const sx of r.sessions) {
+    out.push("");
+    out.push("### " + sx.actor.name + (sx.aiInUse && sx.actor.kind !== "ai" ? " (via " + sx.aiInUse + ")" : ""));
+    out.push("");
+    out.push("- " + clock(sx.start) + " to " + clock(sx.end) + " — " + core.humanDuration(sx.durationMs) +
+             (sx.observed === "single-event" ? " (one action, no span)" : ""));
+    out.push("- " + Object.entries(sx.actions).map(([k, n]) => k + " x" + n).join(", "));
+    const mix = Object.entries(sx.confidence).filter(([, n]) => n > 0).map(([k, n]) => k + " " + n).join(", ");
+    out.push("- attribution: " + mix);
+    if (sx.files.length) {
+      out.push("- files:");
+      for (const f of sx.files) out.push("  - `" + f + "`");
+    }
+    if (sx.commands.length) {
+      out.push("- commands:");
+      for (const c of sx.commands.slice(0, 20)) out.push("  - `" + c.slice(0, 160) + "`");
+    }
+    if (sx.reversed) out.push("- **" + sx.reversed + " of these were later undone**");
+  }
+  out.push("");
+  out.push("---");
+  out.push("");
+  out.push("Attribution across the day: " + r.confidence.exact + " exact, " + r.confidence.inferred +
+           " inferred, " + r.confidence.unattributed + " unattributed.");
+  out.push("");
+  out.push("_exact_ = the AI named itself through a hook or MCP. _inferred_ = the file changed while that AI was");
+  out.push("declared in use. _unattributed_ = nobody claimed it and it was not guessed.");
+
+  const doc = await vscode.workspace.openTextDocument({ content: out.join("\n"), language: "markdown" });
+  await vscode.window.showTextDocument(doc, { preview: false });
+}
+
 async function openDashboard() {
   if (!dash) dash = await core.startServer({ ledgerPath: ledgerFile, projectRoot: root, home: homeDir() });
   await vscode.env.openExternal(vscode.Uri.parse(dash.url));
@@ -287,6 +365,7 @@ async function activate(ctx) {
   reg("handoff.dispatchTask", dispatchTask);
   reg("handoff.reviewProject", reviewProject);
   reg("handoff.installMcp", () => installMcp(ctx));
+  reg("handoff.showHistory", showHistory);
   reg("handoff.openDashboard", openDashboard);
   reg("handoff.installClaudeHook", () => installClaudeHook(ctx));
   reg("handoff.verifyLedger", verifyLedger);
@@ -295,7 +374,7 @@ async function activate(ctx) {
   ctx.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => {
     if (doc.uri.scheme !== "file" || !cfg().get("watchFiles")) return;
     savedByHuman.set(doc.uri.fsPath, Date.now());
-    try { logFileEvent("file.edit", doc.uri.fsPath, "vscode-save", { kind: "human", name: humanName() }); } catch (e) { console.error("handoff:", e); }
+    try { logFileEvent("file.edit", doc.uri.fsPath, "vscode-save", { kind: "human", name: humanName() }, "exact"); } catch (e) { console.error("handoff:", e); }
   }));
   if (cfg().get("watchFiles")) {
     const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, "**/*"));
@@ -305,7 +384,7 @@ async function activate(ctx) {
     ctx.subscriptions.push(w);
   }
   ctx.subscriptions.push({ dispose: () => dash && dash.close() }, statusItem);
-  return { _test: { logFileEvent, currentAi, switchAi, installClaudeHook, openDashboard } };
+  return { _test: { logFileEvent, attributeUnclaimed, showHistory, currentAi, switchAi, installClaudeHook, openDashboard } };
 }
 
 function deactivate() { if (dash) return dash.close(); }

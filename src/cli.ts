@@ -16,6 +16,7 @@ import { openContract, acceptItem, closeContract, audit, liveContracts } from ".
 import { writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ApprovalStatus } from "./types.ts";
+import { confidenceOf, dayIndex, dayReport, humanDuration, localDay, sessionize } from "./sessions.ts";
 
 const [cmd, ...rest] = process.argv.slice(2);
 
@@ -54,8 +55,11 @@ function usage(): never {
   auth set-password   (reads the password from HANDOFF_PASSWORD or stdin)
   guardrail add --global ...   (applies to every project)
   serve   [--port N] [--allow-host tunnel.example.com] [--home DIR]
+  days    [--json]                 (every day that has history, newest first)
+  day     [--date YYYY-MM-DD] [--idle MINUTES] [--json]   (who worked that day, for how long, on what)
+  sessions [--date YYYY-MM-DD] [--idle MINUTES] [--json]
   list    [--file PATH]
-  verify  [--file PATH]`);
+  verify  [--file PATH]\n  repair  [--file PATH] --yes      (re-chain a ledger forked by concurrent writers; keeps the original)`);
   process.exit(2);
 }
 
@@ -90,8 +94,80 @@ switch (cmd) {
       const ai = e.aiInUse ? ` [ai=${e.aiInUse}]` : "";
       const ap = e.approval.status !== "unknown" ? ` approval=${e.approval.status}` : "";
       const rv = e.delta === -1 ? ` (undoes ${e.reverses})` : l.isReversed(e.id) ? " (reversed)" : "";
-      console.log(`${String(e.seq).padStart(4)}  ${e.id}  ${e.ts}  ${who}${ai}  ${e.action}${e.target ? " " + e.target : ""}${ap}${rv}`);
+      const cf = confidenceOf(e) === "exact" ? "" : ` (${confidenceOf(e)})`;
+      console.log(`${String(e.seq).padStart(4)}  ${e.id}  ${e.ts}  ${who}${ai}${cf}  ${e.action}${e.target ? " " + e.target : ""}${ap}${rv}`);
     }
+    break;
+  }
+  case "days": {
+    const l = new Ledger(file);
+    const idx = dayIndex(l.all());
+    if (!idx.length) { console.log("no history yet"); break; }
+    if (f.json) { console.log(JSON.stringify(idx, null, 2)); break; }
+    console.log("date         events  who worked");
+    for (const d of idx)
+      console.log(`${d.date}   ${String(d.events).padStart(5)}  ${(d.ais.length ? d.ais : d.actors).join(", ")}`);
+    break;
+  }
+  case "day": {
+    const l = new Ledger(file);
+    const date = f.date || f.on || localDay(new Date());
+    const idle = f.idle ? Number(f.idle) * 60_000 : undefined;
+    const r = dayReport(l.all(), date, { idleMs: idle, isReversed: (id) => l.isReversed(id) });
+    if (f.json) { console.log(JSON.stringify(r, null, 2)); break; }
+
+    console.log(`== ${r.date} ==  ${r.events} event(s), ${r.sessions.length} session(s)`);
+    if (!r.events) { console.log("nothing recorded on that day."); break; }
+
+    console.log("");
+    console.log("Who worked:");
+    for (const a of r.byAi)
+      console.log(`  ${a.name.padEnd(16)} ${humanDuration(a.durationMs).padEnd(14)} ${a.sessions} session(s), ${a.events} action(s), ${a.files} file(s)`);
+
+    console.log("");
+    console.log("Sessions:");
+    for (const s of r.sessions) {
+      const t = (x: string) => new Date(x).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const acts = Object.entries(s.actions).map(([k, n]) => `${k} x${n}`).join(", ");
+      console.log(`  ${t(s.start)}-${t(s.end)}  ${humanDuration(s.durationMs).padEnd(14)} ${s.key}`);
+      console.log(`      ${acts}`);
+      if (s.files.length) console.log(`      files: ${s.files.slice(0, 8).join(", ")}${s.files.length > 8 ? ` (+${s.files.length - 8} more)` : ""}`);
+      if (s.commands.length) console.log(`      commands: ${s.commands.slice(0, 4).map((c) => c.slice(0, 60)).join(" | ")}`);
+      if (s.reversed) console.log(`      ${s.reversed} of these were later undone`);
+    }
+
+    const c = r.confidence;
+    console.log("");
+    console.log(`Attribution: ${c.exact} exact, ${c.inferred} inferred, ${c.unattributed} unattributed.`);
+    if (c.unattributed) console.log("  (unattributed = the file changed and no AI was declared in use; not guessed)");
+    if (r.filesTouched.length) console.log(`Files touched: ${r.filesTouched.length}`);
+    break;
+  }
+  case "sessions": {
+    const l = new Ledger(file);
+    const idle = f.idle ? Number(f.idle) * 60_000 : undefined;
+    const o = { idleMs: idle, isReversed: (id: string) => l.isReversed(id) };
+    const src = f.date ? dayReport(l.all(), f.date, o).sessions : sessionize(l.all(), o);
+    if (f.json) { console.log(JSON.stringify(src, null, 2)); break; }
+    for (const s of src)
+      console.log(`${s.start}  ${humanDuration(s.durationMs).padEnd(14)} ${s.key.padEnd(28)} ${s.events} action(s)${s.files.length ? `, ${s.files.length} file(s)` : ""}`);
+    break;
+  }
+  case "repair": {
+    const before = Ledger.verify(file);
+    if (before.ok) { console.log(`nothing to repair: ${before.events} events, chain intact`); break; }
+    console.log(`chain is broken: ${before.error}${before.atLine ? ` at line ${before.atLine}` : ""}`);
+    if (!("yes" in f)) {
+      console.log("");
+      console.log("Repair re-links the chain. Every hash after the first break changes, so the original");
+      console.log("signatures cannot be kept. No event is lost, the original file is saved beside this one,");
+      console.log("and the repair is recorded as an event. Re-run with --yes to go ahead.");
+      process.exit(2);
+    }
+    const r = Ledger.repair(file, me);
+    console.log(r.note);
+    console.log(r.ok ? "chain is intact again" : "STILL BROKEN after repair; keep the backup and investigate");
+    if (!r.ok) process.exit(1);
     break;
   }
   case "verify": {

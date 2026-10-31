@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { canonical, sha256 } from "./canonical.ts";
 import { redactDeep } from "./redact.ts";
@@ -8,11 +8,34 @@ import type { EventInput, LedgerEvent, LedgerHeader } from "./types.ts";
 const SEED_COUNT = 8;
 const rand32 = () => randomBytes(4).readUInt32BE(0);
 
+// Several processes write this file: the Claude Code hook, the VS Code extension host, the CLI and
+// the dashboard. Each one computes `seq` and `prev` from the current tail, so two appends in the
+// same instant used to produce two events claiming the same position and fork the chain. Everything
+// below exists to make read-tail-then-append one atomic step between processes.
+const LOCK_WAIT_MS = 4000;
+const LOCK_STALE_MS = 15_000;
+
+/** Sleep without a busy loop, in sync code. */
+function sleepSync(ms: number): void {
+  const sab = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(sab, 0, 0, ms);
+}
+
+
 export interface VerifyResult {
   ok: boolean;
   events: number;
   error?: string;
   atLine?: number;
+}
+
+export interface RepairResult {
+  ok: boolean;
+  events: number;
+  reordered: number;
+  backup: string;
+  originalSha256: string;
+  note: string;
 }
 
 export class Ledger {
@@ -21,6 +44,7 @@ export class Ledger {
   private events: LedgerEvent[] = [];
   private ids = new Set<string>();
   private reversed = new Set<string>();
+  private loadedBytes = 0;
 
   constructor(path: string) {
     this.path = path;
@@ -45,7 +69,12 @@ export class Ledger {
   }
 
   private load() {
-    const lines = readFileSync(this.path, "utf8").split("\n").filter((l) => l.length > 0);
+    const raw = readFileSync(this.path, "utf8");
+    this.loadedBytes = Buffer.byteLength(raw);
+    this.events = [];
+    this.ids.clear();
+    this.reversed.clear();
+    const lines = raw.split("\n").filter((l) => l.length > 0);
     if (lines.length === 0) throw new Error("ledger file is empty");
     this.header = JSON.parse(lines[0]!);
     for (const line of lines.slice(1)) {
@@ -54,6 +83,45 @@ export class Ledger {
       this.ids.add(e.id);
       if (e.reverses) this.reversed.add(e.reverses);
     }
+  }
+
+  private lockPath(): string {
+    return this.path + ".lock";
+  }
+
+  /** Exclusive between processes. Steals a lock whose owner evidently died. */
+  private withLock<T>(fn: () => T): T {
+    const lock = this.lockPath();
+    const until = Date.now() + LOCK_WAIT_MS;
+    let fd: number | undefined;
+    for (;;) {
+      try {
+        fd = openSync(lock, "wx");
+        break;
+      } catch (e) {
+        // Windows reports a contended or delete-pending lock as EPERM/EACCES, not EEXIST.
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw e;
+        try {
+          if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock);
+        } catch { /* someone else cleared it first */ }
+        if (Date.now() > until) throw new Error(`ledger is locked by another process: ${lock}`);
+        sleepSync(15 + Math.floor(Math.random() * 25));
+      }
+    }
+    try {
+      return fn();
+    } finally {
+      try { closeSync(fd!); } catch { /* already closed */ }
+      try { unlinkSync(lock); } catch { /* already gone */ }
+    }
+  }
+
+  /** Pick up events other processes appended since we last read. Cheap when nothing changed. */
+  private refresh(): void {
+    try {
+      if (statSync(this.path).size !== this.loadedBytes) this.load();
+    } catch { /* file vanished: keep what we have rather than throwing on a write */ }
   }
 
   private newId(): string {
@@ -82,6 +150,14 @@ export class Ledger {
   }
 
   append(input: EventInput): LedgerEvent {
+    return this.withLock(() => {
+      // Another writer may have moved the tail while we waited for the lock.
+      this.refresh();
+      return this.appendLocked(input);
+    });
+  }
+
+  private appendLocked(input: EventInput): LedgerEvent {
     if (input.reverses) {
       const target = this.get(input.reverses);
       if (!target) throw new Error(`cannot reverse unknown event ${input.reverses}`);
@@ -100,6 +176,10 @@ export class Ledger {
       source: input.source,
     });
 
+    // Default, not a guess: an actor nobody named is unattributed; one that named itself is exact.
+    // Callers that deduced the author (the file watcher) pass "inferred" explicitly.
+    const confidence = input.confidence ?? (input.actor.kind === "unknown" ? "unattributed" : "exact");
+
     const prev = this.events.length ? this.events[this.events.length - 1]!.hash : this.header.genesis;
     const body: Omit<LedgerEvent, "hash"> = {
       type: "event",
@@ -109,6 +189,7 @@ export class Ledger {
       delta: input.reverses ? -1 : 1,
       actor: clean.actor,
       action: clean.action,
+      confidence,
       aiInUse: clean.aiInUse,
       target: clean.target,
       summary: clean.summary,
@@ -121,7 +202,9 @@ export class Ledger {
     };
     const event = { ...body, hash: sha256(canonical(body)) } as LedgerEvent;
 
-    appendFileSync(this.path, canonical(event) + "\n");
+    const line = canonical(event) + "\n";
+    appendFileSync(this.path, line);
+    this.loadedBytes += Buffer.byteLength(line);
     this.events.push(event);
     this.ids.add(event.id);
     if (event.reverses) this.reversed.add(event.reverses);
@@ -133,6 +216,57 @@ export class Ledger {
   }
 
   /** Re-reads the file from disk and checks every hash link. */
+  /**
+   * Re-chain a ledger whose links were broken by concurrent writers.
+   *
+   * This cannot be a silent fix. Re-linking changes every `prev`, and therefore every `hash`, after
+   * the first break: the original signatures cannot be preserved. So we keep the original file
+   * untouched beside the repaired one, record its SHA-256 in a `ledger.repair` event, and lose no
+   * event. Events are ordered by timestamp, which is what the forked writers actually disagreed on.
+   */
+  static repair(path: string, by: { kind: "human" | "system"; name: string }): RepairResult {
+    const raw = readFileSync(path, "utf8");
+    const lines = raw.split("\n").filter((l) => l.length > 0);
+    if (!lines.length) throw new Error("ledger file is empty");
+    const header = JSON.parse(lines[0]!) as LedgerHeader;
+    const events = lines.slice(1).map((l) => JSON.parse(l) as LedgerEvent);
+
+    const before = events.map((e) => e.id);
+    const ordered = [...events].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts) || a.seq - b.seq);
+    const reordered = ordered.reduce((n, e, i) => (e.id === before[i] ? n : n + 1), 0);
+
+    const originalSha256 = sha256(raw);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backup = `${path}.broken-${stamp}`;
+    writeFileSync(backup, raw);
+
+    // Re-link from the genesis hash, keeping every event body apart from seq/prev/hash.
+    let prev = header.genesis;
+    const out: string[] = [canonical(header)];
+    for (let i = 0; i < ordered.length; i++) {
+      const { hash: _h, prev: _p, seq: _s, ...rest } = ordered[i]!;
+      const body = { ...rest, seq: i, prev } as Omit<LedgerEvent, "hash">;
+      const event = { ...body, hash: sha256(canonical(body)) } as LedgerEvent;
+      prev = event.hash;
+      out.push(canonical(event));
+    }
+    writeFileSync(path, out.join("\n") + "\n");
+
+    // The repair is the next event in the chain, so the record says it happened.
+    const l = new Ledger(path);
+    const note = `re-chained ${ordered.length} event(s) after a concurrent-write fork; ${reordered} moved into timestamp order; original kept at ${backup} (sha256 ${originalSha256.slice(0, 16)})`;
+    l.append({
+      actor: by,
+      action: "ledger.repair",
+      summary: note,
+      source: "manual",
+      payload: { originalSha256, backup, events: ordered.length, reordered },
+    });
+
+    const v = Ledger.verify(path);
+    return { ok: v.ok, events: ordered.length, reordered, backup, originalSha256, note };
+  }
+
   static verify(path: string): VerifyResult {
     const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.length > 0);
     if (lines.length === 0) return { ok: false, events: 0, error: "empty file" };

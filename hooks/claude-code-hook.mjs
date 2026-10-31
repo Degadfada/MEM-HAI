@@ -2,7 +2,7 @@
 // Claude Code hook -> handoff ledger. Always exits 0. It prints to stdout ONLY to deny a tool call that breaks a block-level guardrail (PreToolUse).
 // Wire it to PostToolUse and Notification (see "Handoff: Install Claude Code hook" in VS Code, or hooks/README).
 import { readFileSync, writeFileSync, existsSync, unlinkSync, statSync, mkdirSync } from "node:fs";
-import { dirname, join, relative, isAbsolute } from "node:path";
+import { dirname, join, relative, isAbsolute, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -17,11 +17,16 @@ try {
 
   mkdirSync(dirname(ledgerPath), { recursive: true });
   const ai = { kind: "ai", name: "claude-code" };
-  const rel = (p) => (p && isAbsolute(p) ? relative(cwd, p) : p);
+  const rel = (p) => {
+  const r = p && isAbsolute(p) ? relative(cwd, p) : p;
+  return r ? String(r).split(sep).join("/") : r;
+};
+// A shell command can span lines; the ledger reads better as one.
+const oneLine = (c) => String(c || "").replace(/\s+/g, " ").trim();
 
   const attemptOf = (tool, ti) => {
     if (["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool)) return { action: "file.edit", target: rel(ti.file_path || ti.notebook_path) };
-    if (tool === "Bash") return { action: "command.run", target: String(ti.command || "") };
+    if (tool === "Bash") return { action: "command.run", target: oneLine(ti.command) };
     return null;
   };
 
@@ -45,7 +50,7 @@ try {
     if (["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool)) {
       ev = { action: tool === "Write" && input.tool_response?.type === "create" ? "file.create" : "file.edit", target: rel(ti.file_path || ti.notebook_path), summary: tool };
     } else if (tool === "Bash") {
-      ev = { action: "command.run", target: String(ti.command || "").slice(0, 300), summary: ti.description || "" };
+      ev = { action: "command.run", target: oneLine(ti.command).slice(0, 300), summary: ti.description || "" };
     }
     if (ev) {
       // PostToolUse only fires for tools that ran. If a permission prompt was shown just before, the human said yes.
@@ -55,7 +60,7 @@ try {
         if (age < 10 * 60 * 1000) approval = { status: "approved", by: "human", at: new Date().toISOString() };
         unlinkSync(marker);
       }
-      new Ledger(ledgerPath).append({ actor: ai, aiInUse: "claude-code", source: "hook", approval, ...ev });
+      new Ledger(ledgerPath).append({ actor: ai, aiInUse: "claude-code", source: "hook", confidence: "exact", approval, ...ev });
     }
   }
 } catch (e) {

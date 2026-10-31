@@ -16,6 +16,7 @@ import { finishDispatch } from "./learn.ts";
 import { Projects, ledgerPathFor } from "./projects.ts";
 import { Sessions, checkPassword, cookieOf, hasPassword, makeThrottle } from "./auth.ts";
 import { defaultHome } from "./guardrails.ts";
+import { dayIndex, dayReport, eventsOn, sessionize } from "./sessions.ts";
 
 export interface ServerOptions {
   ledgerPath: string;
@@ -143,6 +144,37 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         const trail: string[] = [];
         for (const e of ev) if (e.delta === 1 && !fresh.isReversed(e.id) && e.aiInUse && trail[trail.length - 1] !== e.aiInUse) trail.push(e.aiInUse);
         return send(200, { events: ev.length, byAction: by, approvals, aiEvents: ai, humanEvents: human, aiTrail: trail, currentAi: trail[trail.length - 1] ?? null, verify: Ledger.verify(lp) });
+      }
+      // --- history: time travel. All read-only.
+      if (req.method === "GET" && url.pathname === "/api/days") {
+        return send(200, dayIndex(fresh.all()));
+      }
+      if (req.method === "GET" && url.pathname === "/api/day") {
+        const date = url.searchParams.get("date") ?? "";
+        const idle = Number(url.searchParams.get("idle") ?? 0);
+        try {
+          return send(200, dayReport(fresh.all(), date, {
+            idleMs: idle > 0 ? idle * 60_000 : undefined,
+            isReversed: (id: string) => fresh.isReversed(id),
+          }));
+        } catch (e) {
+          return send(400, { error: (e as Error).message });
+        }
+      }
+      if (req.method === "GET" && url.pathname === "/api/day/events") {
+        const date = url.searchParams.get("date") ?? "";
+        try {
+          return send(200, eventsOn(fresh.all(), date).map((e) => ({ ...e, reversed: fresh.isReversed(e.id) })));
+        } catch (e) {
+          return send(400, { error: (e as Error).message });
+        }
+      }
+      if (req.method === "GET" && url.pathname === "/api/sessions") {
+        const idle = Number(url.searchParams.get("idle") ?? 0);
+        return send(200, sessionize(fresh.all(), {
+          idleMs: idle > 0 ? idle * 60_000 : undefined,
+          isReversed: (id: string) => fresh.isReversed(id),
+        }));
       }
       if (req.method === "GET" && url.pathname === "/api/events") {
         const limit = Math.min(500, Number(url.searchParams.get("limit") ?? 100));

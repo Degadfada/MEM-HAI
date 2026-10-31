@@ -57,7 +57,8 @@ const lp = join(root, ".handoff", "ledger.jsonl");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 test("activates, registers every command, creates the ledger, shows status", () => {
-  assert.equal(commands.size, 17);
+  assert.equal(commands.size, 18);
+  assert.ok(commands.has("handoff.showHistory"), "the history command is registered");
   assert.ok(existsSync(lp));
   assert.match(status.text, /no AI/);
 });
