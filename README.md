@@ -1,5 +1,8 @@
 # MEM-HAI
 
+[![CI](https://github.com/Degadfada/MEM-HAI/actions/workflows/ci.yml/badge.svg)](https://github.com/Degadfada/MEM-HAI/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 > A memory system that sits in between a human and an AI system, or a group of AI systems, to ensure
 > that a project is owned by the human via the machine — and not by the AIs, their vendor, or their
 > tools.
