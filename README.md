@@ -1,4 +1,10 @@
-# AI Handoff Ledger
+# MEM-HAI
+
+> A memory system that sits in between a human and an AI system, or a group of AI systems, to ensure
+> that a project is owned by the human via the machine — and not by the AIs, their vendor, or their
+> tools.
+
+That is the whole idea. Everything below is how it is kept true.
 
 **The AI–human handshake for your projects.** A local, tamper-evident record of what was done, **why**
 it was done, **who** gave the go-ahead, and **when** — held outside any AI, so changing AI does not
