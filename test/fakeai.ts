@@ -1,6 +1,8 @@
 import http from "node:http";
 
-/** A fake server that speaks the real wire formats of Anthropic, Gemini and Ollama, and records what it received. */
+/** A fake server that speaks the real wire formats of Anthropic, Gemini, Ollama and the OpenAI
+ *  chat-completions shape (which Kimi/Moonshot, DeepSeek, Groq, OpenRouter and vLLM also speak),
+ *  and records what it received. */
 export interface Seen { path: string; headers: http.IncomingHttpHeaders; body: any }
 export async function fakeAi(reply: (prompt: string, system: string | undefined, path: string) => string = (p) => `echo: ${p.slice(0, 40)}`) {
   const seen: Seen[] = [];
@@ -21,6 +23,14 @@ export async function fakeAi(reply: (prompt: string, system: string | undefined,
       } else if (req.url === "/api/chat") {
         const prompt = body.messages.at(-1).content;
         res.end(JSON.stringify({ message: { role: "assistant", content: reply(prompt, body.messages[0]?.role === "system" ? body.messages[0].content : undefined, req.url!) }, prompt_eval_count: 60, eval_count: 30 }));
+      } else if (req.url === "/v1/chat/completions") {
+        const msgs = body.messages ?? [];
+        const prompt = msgs.at(-1)?.content;
+        const system = msgs[0]?.role === "system" ? msgs[0].content : undefined;
+        res.end(JSON.stringify({
+          choices: [{ index: 0, message: { role: "assistant", content: reply(prompt, system, req.url!) }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 70, completion_tokens: 35 },
+        }));
       } else { res.writeHead(404); res.end("{}"); }
     });
   });

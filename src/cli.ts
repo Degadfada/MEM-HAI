@@ -3,7 +3,7 @@ import { FILENAME, makeBrief, type Target } from "./handoff.ts";
 import { buildVerifiedBrief } from "./verify.ts";
 import { startServer } from "./server.ts";
 import { serveStdio } from "./mcp.ts";
-import { Registry } from "./providers.ts";
+import { KINDS, Registry, type Kind } from "./providers.ts";
 import { KnowledgeStore } from "./knowledge.ts";
 import { Projects } from "./projects.ts";
 import { approveDispatch, dispatch, queue, review, summarizeProject, type StewardDeps } from "./steward.ts";
@@ -34,8 +34,16 @@ const f = flags(rest);
 const file = f.file ?? process.env.LEDGER_FILE ?? ".handoff/ledger.jsonl";
 const home = f.home ?? defaultHome();
 const me = { kind: "human" as const, name: process.env.USER ?? "human" };
-const registry = () => new Registry({ home });
-const steward = (l: Ledger): StewardDeps => { const r = registry(); return { ledger: l, home, knowledge: new KnowledgeStore(`${home}/knowledge`), ask: r.holder("steward") ? async (system, prompt) => (await r.askSteward({ system, prompt, maxTokens: 700 })).text : undefined }; };
+// Given a ledger, every API call this process makes lands in it -- with the exchange recorded and
+// a "recorded" rationale attached. Without one, calls would run and leave no trace.
+const registry = (l?: Ledger) =>
+  new Registry({
+    home,
+    onEvent: l
+      ? (e) => l.append({ actor: { kind: "system", name: "registry" }, action: e.action, summary: e.summary, payload: e.payload, rationale: e.rationale, source: "registry" })
+      : undefined,
+  });
+const steward = (l: Ledger): StewardDeps => { const r = registry(l); return { ledger: l, home, knowledge: new KnowledgeStore(`${home}/knowledge`), ask: r.holder("steward") ? async (system, prompt) => (await r.askSteward({ system, prompt, maxTokens: 700 })).text : undefined }; };
 
 function usage(): never {
   console.error(`usage:
@@ -48,7 +56,7 @@ function usage(): never {
   mcp     [--agent NAME]   (MCP server on stdio for any MCP-capable AI)
   guardrail add --level block|advise --text T --kind command|path|action --pattern P | list | check --action A [--target T]
   contract  open --id ID --goal G [--accept "a;b"] [--in "src/**;test/**"] [--out "x/**"] | list | accept --id ID --item N | close --id ID | audit --id ID
-  providers add --name N --kind anthropic|gemini|ollama --model M [--key-env ENVVAR] [--base-url U] | list | wake --name N --role editor|steward | sleep --name N | budget --tokens N
+  providers add --name N --kind anthropic|gemini|ollama|openai-compatible --model M [--key-env ENVVAR] [--base-url U] | list | wake --name N --role editor|steward | sleep --name N | budget --tokens N
   knowledge ingest --path BOOK.txt | search --q "words"
   dispatch --task "what to do" [--contract ID] | queue | approve --id ID | finish --id ID | review | summary --name PROJECT
   projects add --name N --root DIR | list | summaries | consolidate | lessons
@@ -228,8 +236,8 @@ switch (cmd) {
     break;
   }
   case "providers": {
-    const sf = flags(rest.slice(1)), r = registry();
-    if (rest[0] === "add") { r.add({ name: sf.name ?? "", kind: sf.kind as "ollama", model: sf.model ?? "", keyEnv: sf["key-env"], baseUrl: sf["base-url"] }); console.log("added (asleep)"); }
+    const sf = flags(rest.slice(1)), r = registry(new Ledger(file));
+    if (rest[0] === "add") { r.add({ name: sf.name ?? "", kind: sf.kind as Kind, model: sf.model ?? "", keyEnv: sf["key-env"], baseUrl: sf["base-url"] }); console.log("added (asleep)"); }
     else if (rest[0] === "list") { const st = r.status(); console.log(`budget ${st.usedToday}/${st.dailyTokens} tokens today`); for (const p of st.providers) console.log(`${p.name.padEnd(14)} ${p.role.padEnd(8)} ${p.kind}/${p.model}${p.keySet ? "" : "  (key missing)"}`); }
     else if (rest[0] === "wake") { const out = r.wake(sf.name ?? "", sf.role as "editor"); new Ledger(file).append({ actor: me, action: "provider.wake", summary: `${out.woke} awake as ${sf.role}`, source: "cli" }); console.log(JSON.stringify(out)); }
     else if (rest[0] === "sleep") { r.sleep(sf.name ?? ""); console.log("asleep"); }

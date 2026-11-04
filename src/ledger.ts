@@ -2,8 +2,9 @@ import { randomBytes } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { canonical, sha256 } from "./canonical.ts";
-import { redactDeep } from "./redact.ts";
-import type { EventInput, LedgerEvent, LedgerHeader } from "./types.ts";
+import { redactDeep, redactString } from "./redact.ts";
+import { EXCERPT_CHARS } from "./types.ts";
+import type { EventInput, LedgerEvent, LedgerHeader, Provenance, Rationale } from "./types.ts";
 
 const SEED_COUNT = 8;
 const rand32 = () => randomBytes(4).readUInt32BE(0);
@@ -14,6 +15,34 @@ const rand32 = () => randomBytes(4).readUInt32BE(0);
 // below exists to make read-tail-then-append one atomic step between processes.
 const LOCK_WAIT_MS = 4000;
 const LOCK_STALE_MS = 15_000;
+
+/**
+ * Clamp and redact a rationale before it can reach disk.
+ *
+ * Excerpts come from conversations, which is exactly where pasted keys and client details live, so
+ * they go through the same redactor as everything else and are cut to EXCERPT_CHARS. The citation
+ * `ref` is kept whole: it is ids and a path, and it is what makes the untruncated original findable.
+ */
+function normalizeRationale(r: Rationale | undefined): Rationale | undefined {
+  if (!r) return undefined;
+  const clip = (s: string | undefined): string | undefined => {
+    if (!s) return undefined;
+    const clean = redactString(s).text.replace(/\s+/g, " ").trim();
+    if (!clean) return undefined;
+    return clean.length > EXCERPT_CHARS ? clean.slice(0, EXCERPT_CHARS - 1) + "…" : clean;
+  };
+  const ask = clip(r.ask);
+  const reason = clip(r.reason);
+  // Claiming a provenance tier with nothing to show for it would be the one dishonesty this
+  // whole ladder exists to prevent.
+  const provenance: Provenance = ask || reason ? r.provenance : "absent";
+  const out: Rationale = { provenance };
+  if (ask) out.ask = ask;
+  if (reason) out.reason = reason;
+  if (r.approvedBy) out.approvedBy = r.approvedBy;
+  if (r.ref && Object.values(r.ref).some((v) => v)) out.ref = r.ref;
+  return out;
+}
 
 /** Sleep without a busy loop, in sync code. */
 function sleepSync(ms: number): void {
@@ -185,6 +214,10 @@ export class Ledger {
     // Callers that deduced the author (the file watcher) pass "inferred" explicitly.
     const confidence = input.confidence ?? (input.actor.kind === "unknown" ? "unattributed" : "exact");
 
+    // The cap and the redaction live HERE, at the single door into the ledger, so no caller can put
+    // an unbounded or unredacted excerpt of a conversation on disk by forgetting to.
+    const rationale = normalizeRationale(input.rationale);
+
     const prev = this.events.length ? this.events[this.events.length - 1]!.hash : this.header.genesis;
     const body: Omit<LedgerEvent, "hash"> = {
       type: "event",
@@ -195,6 +228,7 @@ export class Ledger {
       actor: clean.actor,
       action: clean.action,
       confidence,
+      rationale,
       aiInUse: clean.aiInUse,
       target: clean.target,
       summary: clean.summary,

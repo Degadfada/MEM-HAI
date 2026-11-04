@@ -125,7 +125,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       const proj = url.searchParams.get("project");
       if (proj) lp = ledgerPathFor(new Projects(home).get(proj).root);
       const fresh = new Ledger(lp);
-      const registry = new Registry({ home, fetch: opts.fetch, onEvent: (e) => fresh.append({ actor: { kind: "system", name: "registry" }, action: e.action, summary: e.summary, payload: e.payload, source: "registry" }) });
+      const registry = new Registry({ home, fetch: opts.fetch, onEvent: (e) => fresh.append({ actor: { kind: "system", name: "registry" }, action: e.action, summary: e.summary, payload: e.payload, rationale: e.rationale, source: "registry" }) });
       const steward = (): StewardDeps => ({
         ledger: fresh, home, knowledge: new KnowledgeStore(join(home, "knowledge")),
         ask: registry.holder("steward") ? async (system, prompt) => (await registry.askSteward({ system, prompt, maxTokens: 700 })).text : undefined,
