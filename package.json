@@ -8,7 +8,8 @@
     "ledger": "node src/cli.ts",
     "typecheck": "tsc --noEmit -p .",
     "build": "./build-ext.sh",
-    "pretest": "tsc -p ."
+    "pretest": "tsc -p . && node scripts/stage-extension.mjs",
+    "stage": "node scripts/stage-extension.mjs"
   },
   "engines": {
     "node": ">=22.18"
