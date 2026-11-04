@@ -126,7 +126,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       let lp = opts.ledgerPath;
       const proj = url.searchParams.get("project");
       if (proj) lp = ledgerPathFor(new Projects(home).get(proj).root);
-      const fresh = new Ledger(lp);
+      const fresh = Ledger.open(lp); // shared handle: parse once, then only new bytes
       const registry = new Registry({ home, fetch: opts.fetch, onEvent: (e) => fresh.append({ actor: { kind: "system", name: "registry" }, action: e.action, summary: e.summary, payload: e.payload, rationale: e.rationale, source: "registry" }) });
       const steward = (): StewardDeps => ({
         ledger: fresh, home, knowledge: new KnowledgeStore(join(home, "knowledge")),

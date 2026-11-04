@@ -17,6 +17,8 @@ import { writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ApprovalStatus } from "./types.ts";
 import { confidenceOf, dayIndex, dayReport, humanDuration, localDay, sessionize } from "./sessions.ts";
+import { compact, planCompaction } from "./compact.ts";
+import { initProject } from "./init.ts";
 
 const [cmd, ...rest] = process.argv.slice(2);
 
@@ -67,6 +69,8 @@ function usage(): never {
   day     [--date YYYY-MM-DD] [--idle MINUTES] [--json]   (who worked that day, for how long, on what)
   sessions [--date YYYY-MM-DD] [--idle MINUTES] [--json]
   list    [--file PATH]
+  init    [--root DIR] [--name N]  (set this project up: hook, MCP, gitignore, registration)
+  compact [--file PATH] [--yes]    (archive tooling churn; nothing is deleted)
   verify  [--file PATH]\n  repair  [--file PATH] --yes      (re-chain a ledger forked by concurrent writers; keeps the original)`);
   process.exit(2);
 }
@@ -175,6 +179,35 @@ switch (cmd) {
     const r = Ledger.repair(file, me);
     console.log(r.note);
     console.log(r.ok ? "chain is intact again" : "STILL BROKEN after repair; keep the backup and investigate");
+    if (!r.ok) process.exit(1);
+    break;
+  }
+  case "init": {
+    const r = initProject({ root: f.root ?? process.cwd(), home, ledgerFile: file, name: f.name });
+    for (const line of r.log) console.log(line);
+    console.log("");
+    console.log(r.restartNeeded
+      ? "Restart Claude Code to load the hook, and reload the VS Code window for MCP."
+      : "Nothing to do: this project was already set up.");
+    break;
+  }
+  case "compact": {
+    const plan = planCompaction(file);
+    if (!plan.archivable) { console.log(`nothing to compact: ${plan.total} event(s), none is tooling churn`); break; }
+    const pct = Math.round((plan.archivable / plan.total) * 100);
+    console.log(`${plan.archivable} of ${plan.total} event(s) (${pct}%) are a program rewriting its own files:`);
+    for (const t of plan.topTargets) console.log(`  ${String(t.count).padStart(6)}x  ${t.target}`);
+    console.log(`${plan.keep} event(s) would remain.`);
+    if (!("yes" in f)) {
+      console.log("");
+      console.log("They are moved to an archive ledger beside this one, never deleted. The remainder is");
+      console.log("re-chained, so every later hash changes and the original is kept too. The compaction");
+      console.log("is itself recorded as an event. Re-run with --yes to go ahead.");
+      process.exit(2);
+    }
+    const r = compact(file, me);
+    console.log(r.note);
+    console.log(r.ok ? "chain is intact" : "CHAIN BROKEN after compaction; keep the backup and investigate");
     if (!r.ok) process.exit(1);
     break;
   }

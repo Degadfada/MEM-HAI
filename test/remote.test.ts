@@ -5,7 +5,7 @@ import { mkdtempSync, copyFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer } from "../src/server.ts";
-import { setPassword, checkPassword, makeThrottle, Sessions, cookieOf } from "../src/auth.ts";
+import { setPassword, checkPassword, makeThrottle, Sessions, cookieOf, restrictToOwner } from "../src/auth.ts";
 import { Ledger } from "../src/ledger.ts";
 import { Registry } from "../src/providers.ts";
 import { addGlobalGuardrail } from "../src/guardrails.ts";
@@ -57,7 +57,9 @@ test("password storage: scrypt hash, owner-only file, no plaintext; min length",
   assert.throws(() => setPassword(home, "short"), /at least 12/);
   const raw = readFileSync(join(home, "auth.json"), "utf8");
   assert.ok(!raw.includes(PASSWORD));
-  assert.equal(statSync(join(home, "auth.json")).mode & 0o077, 0, "file must not be group/world readable");
+  // NTFS ignores POSIX mode bits, so on Windows owner-only is an ACL question, not a mode question.
+  if (process.platform === "win32") assert.equal(restrictToOwner(join(home, "auth.json")), true, "ACL must leave only the owner");
+  else assert.equal(statSync(join(home, "auth.json")).mode & 0o077, 0, "file must not be group/world readable");
   assert.equal(checkPassword(home, PASSWORD), true);
   assert.equal(checkPassword(home, PASSWORD + "x"), false);
 });

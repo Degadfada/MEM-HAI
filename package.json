@@ -1,11 +1,14 @@
 {
-  "name": "handoff-ledger",
-  "version": "0.1.0",
-  "description": "Phase 1 of the AI handoff memory tool: a lossless, hash-chained, secret-redacting event ledger.",
+  "name": "ai-handoff-ledger",
+  "version": "1.0.0",
+  "description": "The AI-human handshake for your projects: a local, tamper-evident record of what was done, why, who approved it and when - held outside any AI.",
   "type": "module",
   "scripts": {
     "test": "node --test \"test/*.test.ts\"",
-    "ledger": "node src/cli.ts"
+    "ledger": "node src/cli.ts",
+    "typecheck": "tsc --noEmit -p .",
+    "build": "./build-ext.sh",
+    "test:ci": "node --test \"test/*.test.ts\""
   },
   "engines": {
     "node": ">=22.18"
@@ -15,5 +18,20 @@
   },
   "dependencies": {
     "typescript": "^5.9.3"
-  }
+  },
+  "author": "Edimekabasi E. AKpaneka <Edimekabasi@gmail.com>",
+  "license": "MIT",
+  "keywords": [
+    "ai",
+    "audit",
+    "provenance",
+    "ledger",
+    "mcp",
+    "claude-code",
+    "copilot",
+    "cursor",
+    "vscode",
+    "handoff",
+    "memory"
+  ]
 }

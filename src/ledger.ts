@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, readSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { canonical, sha256 } from "./canonical.ts";
 import { redactDeep, redactString } from "./redact.ts";
@@ -100,6 +100,9 @@ export interface RepairResult {
   note: string;
 }
 
+/** Shared handles by path, so repeated opens do not re-parse the whole file. */
+const OPEN = new Map<string, Ledger>();
+
 export class Ledger {
   readonly path: string;
   header!: LedgerHeader;
@@ -151,12 +154,71 @@ export class Ledger {
     return withFileLock(this.path, fn);
   }
 
-  /** Pick up events other processes appended since we last read. Cheap when nothing changed. */
+  /**
+   * Pick up events other processes appended since we last read.
+   *
+   * Free when nothing changed, and O(new bytes) when it grew: only the tail is read and parsed. That
+   * matters because the server opens the ledger on every request, and this one grew 13k events in
+   * four days -- re-parsing the whole file each time does not survive a real project.
+   *
+   * A chain check guards the fast path: the first new event must point at the last one we hold. If a
+   * repair rewrote the file underneath us, that fails and we fall back to a full read.
+   */
   private refresh(): void {
     try {
-      if (statSync(this.path).size !== this.loadedBytes) this.load();
+      const size = statSync(this.path).size;
+      if (size === this.loadedBytes) return;
+      if (size < this.loadedBytes) return this.load(); // truncated or rewritten
+      if (!this.loadedBytes) return this.load();
+
+      const grew = size - this.loadedBytes;
+      const buf = Buffer.allocUnsafe(grew);
+      const fd = openSync(this.path, "r");
+      try { readSync(fd, buf, 0, grew, this.loadedBytes); } finally { closeSync(fd); }
+
+      const text = buf.toString("utf8");
+      // A writer mid-append leaves no trailing newline; take only whole lines and come back later.
+      const lastNl = text.lastIndexOf("\n");
+      if (lastNl < 0) return;
+      const whole = text.slice(0, lastNl + 1);
+      const lines = whole.split("\n").filter((l) => l.length > 0);
+
+      const parsed: LedgerEvent[] = [];
+      for (const line of lines) {
+        try { parsed.push(JSON.parse(line) as LedgerEvent); } catch { return this.load(); }
+      }
+      const prevHash = this.events.length ? this.events[this.events.length - 1]!.hash : this.header.genesis;
+      if (parsed.length && parsed[0]!.prev !== prevHash) return this.load();
+
+      for (const e of parsed) {
+        this.events.push(e);
+        this.ids.add(e.id);
+        if (e.reverses) this.reversed.add(e.reverses);
+      }
+      this.loadedBytes += Buffer.byteLength(whole);
     } catch { /* file vanished: keep what we have rather than throwing on a write */ }
   }
+
+  /**
+   * A shared, self-refreshing handle. Callers that re-open the ledger on every request (the HTTP
+   * server, the MCP server) should use this: the parse is paid once and then only for new bytes.
+   * Still safe across processes, because append() re-reads the tail under the lock either way.
+   */
+  static open(path: string): Ledger {
+    const hit = OPEN.get(path);
+    if (hit) { hit.refresh(); return hit; }
+    const l = new Ledger(path);
+    OPEN.set(path, l);
+    return l;
+  }
+
+  /** Drop the shared handles. For tests, and after a repair rewrites a file in this process. */
+  static forget(path?: string): void {
+    if (path) OPEN.delete(path); else OPEN.clear();
+  }
+
+  /** Re-read from disk now. Public so a caller that knows the file moved can force it. */
+  reload(): void { this.load(); }
 
   private newId(): string {
     // 64 random bits: collision probability for n events <= n^2 / 2^65.
@@ -268,6 +330,7 @@ export class Ledger {
     // is appended afterwards, outside the lock, because append() takes the lock itself and it is
     // not reentrant -- safe, because the chain is already valid again by then.
     const staged = withFileLock(path, () => Ledger.rechain(path));
+    Ledger.forget(path); // every hash after the break changed; no cached handle may survive it
     const l = new Ledger(path);
     const note = `re-chained ${staged.events} event(s) after a concurrent-write fork; ${staged.reordered} moved into timestamp order; original kept at ${staged.backup} (sha256 ${staged.originalSha256.slice(0, 16)})`;
     l.append({
@@ -289,8 +352,22 @@ export class Ledger {
     const header = JSON.parse(lines[0]!) as LedgerHeader;
     const events = lines.slice(1).map((l) => JSON.parse(l) as LedgerEvent);
 
-    const before = events.map((e) => e.id);
-    const ordered = [...events].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts) || a.seq - b.seq);
+    // A line that appears twice byte for byte carries no information the first copy did not, so it
+    // is dropped. Two events sharing an id but differing in content is a different animal: that is
+    // a genuine conflict, and resolving it by picking one or by minting a new id would be inventing
+    // history. We refuse instead, and say which id.
+    const seen = new Map<string, string>();
+    const unique: LedgerEvent[] = [];
+    for (const e of events) {
+      const body = canonical(e);
+      const prior = seen.get(e.id);
+      if (prior === undefined) { seen.set(e.id, body); unique.push(e); continue; }
+      if (prior === body) continue; // exact replay
+      throw new Error(`event ${e.id} appears twice with different contents; repair will not choose between them`);
+    }
+
+    const before = unique.map((e) => e.id);
+    const ordered = [...unique].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts) || a.seq - b.seq);
     const reordered = ordered.reduce((n, e, i) => (e.id === before[i] ? n : n + 1), 0);
 
     const originalSha256 = sha256(raw);

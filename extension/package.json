@@ -1,8 +1,8 @@
 {
   "name": "ai-handoff-ledger",
   "displayName": "AI Handoff Ledger",
-  "description": "Records who did what in your project (you vs. which AI), whether you approved it, and hands the project's memory to the next AI.",
-  "version": "0.5.0",
+  "description": "The AI-human handshake: records what each AI did, why, who approved it and when - and hands your project memory to the next AI.",
+  "version": "1.0.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.85.0"
@@ -140,5 +140,17 @@
     "extension.js",
     "core",
     "hook"
+  ],
+  "author": "Edimekabasi E. AKpaneka",
+  "license": "MIT",
+  "keywords": [
+    "ai",
+    "audit",
+    "provenance",
+    "mcp",
+    "claude-code",
+    "copilot",
+    "cursor",
+    "handoff"
   ]
 }

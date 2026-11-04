@@ -40,7 +40,7 @@ const text = (t: string, isError = false) => ({ content: [{ type: "text", text: 
 const json = (v: unknown) => text(JSON.stringify(v, null, 2));
 
 export function callTool(o: McpOptions, name: string, a: Json) {
-  const l = new Ledger(o.ledgerPath); // reopen: other processes append too
+  const l = Ledger.open(o.ledgerPath); // shared handle; append() still re-reads the tail under the lock
   const ai = { kind: "ai" as const, name: o.agentName };
   try {
     switch (name) {

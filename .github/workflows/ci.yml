@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # The ledger makes platform-specific promises -- an exclusive lock that must survive Windows
+    # returning EPERM for a contended file, and an owner-only secret that NTFS cannot express with
+    # POSIX mode bits -- so the suite has to prove itself on both.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The TypeScript sources run directly on Node >= 22.18 via type stripping.
+          node-version: 22.18
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p .
+
+      - name: Test
+        run: npm test
+
+      - name: Build the extension bundle
+        if: matrix.os == 'ubuntu-latest'
+        run: ./build-ext.sh
+
+      - name: Package the VSIX
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: extension
+        run: npx --yes @vscode/vsce@latest package --allow-missing-repository --skip-license -o ../ai-handoff-ledger.vsix
+
+      - name: Keep the VSIX
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-handoff-ledger-vsix
+          path: ai-handoff-ledger.vsix
+          if-no-files-found: error
