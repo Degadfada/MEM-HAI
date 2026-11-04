@@ -7,7 +7,7 @@
     "test": "node --test \"test/*.test.ts\"",
     "ledger": "node src/cli.ts",
     "typecheck": "tsc --noEmit -p .",
-    "build": "./build-ext.sh",
+    "build": "tsc -p . && node scripts/stage-extension.mjs",
     "pretest": "tsc -p . && node scripts/stage-extension.mjs",
     "stage": "node scripts/stage-extension.mjs"
   },

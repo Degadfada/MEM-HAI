@@ -35,9 +35,11 @@ jobs:
       - name: Test
         run: npm test
 
+      # npm run build, not ./build-ext.sh: the shell script is a convenience for humans, and a
+      # pipeline should not depend on a file's exec bit surviving a checkout.
       - name: Build the extension bundle
         if: matrix.os == 'ubuntu-latest'
-        run: ./build-ext.sh
+        run: npm run build
 
       - name: Package the VSIX
         if: matrix.os == 'ubuntu-latest'
