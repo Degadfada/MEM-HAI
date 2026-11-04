@@ -21,6 +21,39 @@ function sleepSync(ms: number): void {
   Atomics.wait(sab, 0, 0, ms);
 }
 
+/**
+ * Hold `<path>.lock` for the duration of fn. Exclusive between processes, and used by every
+ * operation that reads the tail then writes -- appending AND repairing. A repair that did not hold
+ * this could be overtaken mid-rewrite by a live writer and lose or re-fork events.
+ * Steals a lock whose owner evidently died.
+ */
+export function withFileLock<T>(path: string, fn: () => T): T {
+  const lock = path + ".lock";
+  const until = Date.now() + LOCK_WAIT_MS;
+  let fd: number | undefined;
+  for (;;) {
+    try {
+      fd = openSync(lock, "wx");
+      break;
+    } catch (e) {
+      // Windows reports a contended or delete-pending lock as EPERM/EACCES, not EEXIST.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw e;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock);
+      } catch { /* someone else cleared it first */ }
+      if (Date.now() > until) throw new Error(`ledger is locked by another process: ${lock}`);
+      sleepSync(15 + Math.floor(Math.random() * 25));
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try { closeSync(fd!); } catch { /* already closed */ }
+    try { unlinkSync(lock); } catch { /* already gone */ }
+  }
+}
+
 
 export interface VerifyResult {
   ok: boolean;
@@ -85,36 +118,8 @@ export class Ledger {
     }
   }
 
-  private lockPath(): string {
-    return this.path + ".lock";
-  }
-
-  /** Exclusive between processes. Steals a lock whose owner evidently died. */
   private withLock<T>(fn: () => T): T {
-    const lock = this.lockPath();
-    const until = Date.now() + LOCK_WAIT_MS;
-    let fd: number | undefined;
-    for (;;) {
-      try {
-        fd = openSync(lock, "wx");
-        break;
-      } catch (e) {
-        // Windows reports a contended or delete-pending lock as EPERM/EACCES, not EEXIST.
-        const code = (e as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw e;
-        try {
-          if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock);
-        } catch { /* someone else cleared it first */ }
-        if (Date.now() > until) throw new Error(`ledger is locked by another process: ${lock}`);
-        sleepSync(15 + Math.floor(Math.random() * 25));
-      }
-    }
-    try {
-      return fn();
-    } finally {
-      try { closeSync(fd!); } catch { /* already closed */ }
-      try { unlinkSync(lock); } catch { /* already gone */ }
-    }
+    return withFileLock(this.path, fn);
   }
 
   /** Pick up events other processes appended since we last read. Cheap when nothing changed. */
@@ -225,6 +230,25 @@ export class Ledger {
    * event. Events are ordered by timestamp, which is what the forked writers actually disagreed on.
    */
   static repair(path: string, by: { kind: "human" | "system"; name: string }): RepairResult {
+    // The rewrite holds the lock, so a live writer cannot be overtaken mid-file. The repair record
+    // is appended afterwards, outside the lock, because append() takes the lock itself and it is
+    // not reentrant -- safe, because the chain is already valid again by then.
+    const staged = withFileLock(path, () => Ledger.rechain(path));
+    const l = new Ledger(path);
+    const note = `re-chained ${staged.events} event(s) after a concurrent-write fork; ${staged.reordered} moved into timestamp order; original kept at ${staged.backup} (sha256 ${staged.originalSha256.slice(0, 16)})`;
+    l.append({
+      actor: by,
+      action: "ledger.repair",
+      summary: note,
+      source: "manual",
+      payload: { originalSha256: staged.originalSha256, backup: staged.backup, events: staged.events, reordered: staged.reordered },
+    });
+    const v = Ledger.verify(path);
+    return { ok: v.ok, events: staged.events, reordered: staged.reordered, backup: staged.backup, originalSha256: staged.originalSha256, note };
+  }
+
+  /** Read, back up and re-link. Must be called holding the lock. */
+  private static rechain(path: string): { events: number; reordered: number; backup: string; originalSha256: string } {
     const raw = readFileSync(path, "utf8");
     const lines = raw.split("\n").filter((l) => l.length > 0);
     if (!lines.length) throw new Error("ledger file is empty");
@@ -252,19 +276,7 @@ export class Ledger {
     }
     writeFileSync(path, out.join("\n") + "\n");
 
-    // The repair is the next event in the chain, so the record says it happened.
-    const l = new Ledger(path);
-    const note = `re-chained ${ordered.length} event(s) after a concurrent-write fork; ${reordered} moved into timestamp order; original kept at ${backup} (sha256 ${originalSha256.slice(0, 16)})`;
-    l.append({
-      actor: by,
-      action: "ledger.repair",
-      summary: note,
-      source: "manual",
-      payload: { originalSha256, backup, events: ordered.length, reordered },
-    });
-
-    const v = Ledger.verify(path);
-    return { ok: v.ok, events: ordered.length, reordered, backup, originalSha256, note };
+    return { events: ordered.length, reordered, backup, originalSha256 };
   }
 
   static verify(path: string): VerifyResult {

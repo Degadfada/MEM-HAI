@@ -2,7 +2,7 @@
   "name": "ai-handoff-ledger",
   "displayName": "AI Handoff Ledger",
   "description": "Records who did what in your project (you vs. which AI), whether you approved it, and hands the project's memory to the next AI.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "local",
   "engines": {
     "vscode": "^1.85.0"
