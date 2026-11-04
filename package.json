@@ -8,7 +8,7 @@
     "ledger": "node src/cli.ts",
     "typecheck": "tsc --noEmit -p .",
     "build": "./build-ext.sh",
-    "test:ci": "node --test \"test/*.test.ts\""
+    "pretest": "tsc -p ."
   },
   "engines": {
     "node": ">=22.18"

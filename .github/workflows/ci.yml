@@ -30,6 +30,8 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit -p .
 
+      # npm test runs tsc first via pretest: some tests exercise the compiled CLI as a real
+      # subprocess, which is the point -- that binary is what ships.
       - name: Test
         run: npm test
 
