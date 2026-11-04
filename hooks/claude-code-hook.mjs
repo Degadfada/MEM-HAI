@@ -14,6 +14,7 @@ try {
   const coreDir = process.env.HANDOFF_CORE || (existsSync(join(here, "core", "ledger.js")) ? join(here, "core") : join(here, "..", "dist"));
   const { Ledger } = await import(new URL("file://" + join(coreDir, "ledger.js")).href);
   const { liveGuardrails, evaluate, logBlocked } = await import(new URL("file://" + join(coreDir, "guardrails.js")).href);
+  const { readRationale } = await import(new URL("file://" + join(coreDir, "rationale.js")).href);
 
   mkdirSync(dirname(ledgerPath), { recursive: true });
   const ai = { kind: "ai", name: "claude-code" };
@@ -36,7 +37,16 @@ const oneLine = (c) => String(c || "").replace(/\s+/g, " ").trim();
       const ledger = new Ledger(ledgerPath);
       const verdict = evaluate(liveGuardrails(ledger, process.env.HANDOFF_HOME || join(process.env.HOME || process.env.USERPROFILE || "", ".handoff")), att);
       if (!verdict.allowed) {
-        logBlocked(ledger, ai, att, verdict, "hook");
+        let blockedWhy;
+        try {
+          blockedWhy = readRationale({
+            transcriptPath: input.transcript_path,
+            promptId: input.prompt_id,
+            sessionId: input.session_id,
+            cacheDir: join(dirname(ledgerPath), "cache"),
+          });
+        } catch {}
+        logBlocked(ledger, ai, att, verdict, "hook", blockedWhy);
         const why = "Blocked by project guardrail: " + verdict.violations.filter((v) => v.level === "block").map((v) => v.text).join("; ");
         process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: why } }));
       }
@@ -60,7 +70,20 @@ const oneLine = (c) => String(c || "").replace(/\s+/g, " ").trim();
         if (age < 10 * 60 * 1000) approval = { status: "approved", by: "human", at: new Date().toISOString() };
         unlinkSync(marker);
       }
-      new Ledger(ledgerPath).append({ actor: ai, aiInUse: "claude-code", source: "hook", confidence: "exact", approval, ...ev });
+      // Why this happened, read out of the transcript Claude Code pointed us at. Attached here at
+      // PostToolUse rather than PreToolUse because the tool_use record does not exist yet at Pre time.
+      // readRationale never throws: an unreadable transcript yields "absent" rather than a failed tool.
+      let rationale;
+      try {
+        rationale = readRationale({
+          transcriptPath: input.transcript_path,
+          promptId: input.prompt_id,
+          toolUseId: input.tool_use_id,
+          sessionId: input.session_id,
+          cacheDir: join(dirname(ledgerPath), "cache"),
+        });
+      } catch {}
+      new Ledger(ledgerPath).append({ actor: ai, aiInUse: "claude-code", source: "hook", confidence: "exact", approval, rationale, ...ev });
     }
   }
 } catch (e) {
