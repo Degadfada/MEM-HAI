@@ -1,3 +1,4 @@
+import type { Rationale } from "./types.ts";
 import type { Ledger } from "./ledger.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -111,6 +112,8 @@ export function addGuardrail(l: Ledger, by: { kind: "human"; name: string }, lev
 }
 
 /** Records that a rule stopped an attempt (so the dashboard and the steward can see it). */
-export function logBlocked(l: Ledger, actor: { kind: "ai"; name: string }, a: Attempt, v: Verdict, source: string) {
-  return l.append({ actor, action: "guardrail.blocked", target: a.target, summary: `${a.action} refused by: ${v.violations.map((x) => x.text).join("; ")}`, payload: { rules: v.violations.map((x) => x.id), attempted: a.action }, source, approval: { status: "denied", by: "guardrail" } });
+export function logBlocked(l: Ledger, actor: { kind: "ai"; name: string }, a: Attempt, v: Verdict, source: string, rationale?: Rationale) {
+  // A refused attempt is the event most worth having a reason on: it is the moment an AI tried
+  // something it was told not to, and "what was it trying to achieve" is the first question asked.
+  return l.append({ actor, action: "guardrail.blocked", target: a.target, summary: `${a.action} refused by: ${v.violations.map((x) => x.text).join("; ")}`, payload: { rules: v.violations.map((x) => x.id), attempted: a.action }, source, rationale, approval: { status: "denied", by: "guardrail" } });
 }

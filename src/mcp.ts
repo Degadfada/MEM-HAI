@@ -5,6 +5,7 @@ import { Ledger } from "./ledger.ts";
 import { makeBrief, type Target } from "./handoff.ts";
 import { addGuardrail, evaluate, liveGuardrails, loadGlobalGuardrails, logBlocked } from "./guardrails.ts";
 import { takeNext } from "./steward.ts";
+import { openTaskFor, rationaleFor } from "./taskwindow.ts";
 import { KnowledgeStore } from "./knowledge.ts";
 import { Projects } from "./projects.ts";
 import { join } from "node:path";
@@ -22,7 +23,7 @@ export interface McpOptions {
 const TOOLS = [
   { name: "get_brief", description: "Project memory: rules, decisions, open tasks, where the code stands. Call this first in every session.", inputSchema: { type: "object", properties: { budget_tokens: { type: "number" } } } },
   { name: "get_guardrails", description: "Rules every AI on this project must follow. 'block' rules are enforced; 'advise' rules are expected.", inputSchema: { type: "object", properties: {} } },
-  { name: "check_action", description: "Ask BEFORE doing something risky. Returns allowed:false if a block rule matches. Blocked attempts are logged.", inputSchema: { type: "object", properties: { action: { type: "string", description: "file.edit | file.create | file.delete | command.run" }, target: { type: "string", description: "path or command" } }, required: ["action"] } },
+  { name: "check_action", description: "Ask BEFORE doing something risky. Returns allowed:false if a block rule matches. Blocked attempts are logged. Pass `why` so the record says what you were trying to achieve.", inputSchema: { type: "object", properties: { action: { type: "string", description: "file.edit | file.create | file.delete | command.run" }, target: { type: "string", description: "path or command" }, why: { type: "string", description: "one sentence: what you are doing and why" } }, required: ["action"] } },
   { name: "get_contracts", description: "Open task contracts: goal, acceptance criteria, allowed paths.", inputSchema: { type: "object", properties: {} } },
   { name: "check_scope", description: "Is this path inside the open contract's scope? Call before touching files outside the obvious area.", inputSchema: { type: "object", properties: { contract: { type: "string" }, path: { type: "string" } }, required: ["contract", "path"] } },
   { name: "confirm_acceptance", description: "Report that an acceptance item is met, with evidence. The human can still reverse it.", inputSchema: { type: "object", properties: { contract: { type: "string" }, item: { type: "number" }, evidence: { type: "string" } }, required: ["contract", "item"] } },
@@ -30,7 +31,9 @@ const TOOLS = [
   { name: "next_task", description: "Pull the next task the human approved for you. It comes as a compiled prompt that already includes the rules and scope. Returns 'none' if the queue is empty.", inputSchema: { type: "object", properties: {} } },
   { name: "find_technique", description: "Search distilled engineering/prompting techniques (from the owner's books and notes) relevant to what you are about to do.", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
   { name: "get_lessons", description: "General understandings that recur across the owner's projects.", inputSchema: { type: "object", properties: {} } },
-  { name: "log_decision", description: "Record a decision and its reason so the next AI keeps it.", inputSchema: { type: "object", properties: { topic: { type: "string" }, decision: { type: "string" } }, required: ["decision"] } },
+  { name: "log_decision", description: "Record a decision and its reason so the next AI keeps it.", inputSchema: { type: "object", properties: { topic: { type: "string" }, decision: { type: "string" }, why: { type: "string", description: "what led you to it" } }, required: ["decision"] } },
+  { name: "log_reason", description: "State what you are about to do and why, before you do it. This is how the record explains your work: without it your actions are logged with no reason attached.", inputSchema: { type: "object", properties: { reason: { type: "string", description: "one sentence: what you are doing and why" }, target: { type: "string", description: "the file or command it concerns" } }, required: ["reason"] } },
+  { name: "my_task", description: "The task you were given and who approved it. Everything you do is recorded against it.", inputSchema: { type: "object", properties: {} } },
 ];
 
 const text = (t: string, isError = false) => ({ content: [{ type: "text", text: t }], ...(isError ? { isError: true } : {}) });
@@ -50,7 +53,7 @@ export function callTool(o: McpOptions, name: string, a: Json) {
       case "check_action": {
         const att = { action: String(a.action), target: a.target === undefined ? undefined : String(a.target) };
         const v = evaluate(liveGuardrails(l, o.home), att);
-        if (!v.allowed) logBlocked(l, ai, att, v, "mcp");
+        if (!v.allowed) logBlocked(l, ai, att, v, "mcp", rationaleFor(l, o.agentName, a.why ? String(a.why) : undefined));
         return json({ allowed: v.allowed, rules: v.violations.map((x) => ({ level: x.level, rule: x.text })) });
       }
       case "get_contracts": return json(liveContracts(l));
@@ -74,8 +77,22 @@ export function callTool(o: McpOptions, name: string, a: Json) {
         return hits.length ? text(hits.map((h) => `- ${h.technique}${h.when ? ` (when: ${h.when})` : ""}`).join("\n")) : text("no matching technique");
       }
       case "get_lessons": return o.home ? json(new Projects(o.home).lessons().map((x) => ({ lesson: x.text, projects: x.projects }))) : json([]);
+      case "log_reason": {
+        const e = l.append({
+          actor: ai, aiInUse: o.agentName, action: "reason",
+          target: a.target ? String(a.target) : undefined,
+          summary: String(a.reason), source: "mcp",
+          rationale: rationaleFor(l, o.agentName, String(a.reason)),
+        });
+        return json({ ok: true, id: e.id, recorded: e.rationale });
+      }
+      case "my_task": {
+        const t = openTaskFor(l, o.agentName);
+        if (!t) return json({ task: null, note: "You hold no approved task. Your actions will be recorded without one." });
+        return json({ dispatchId: t.dispatchId, task: t.task, approvedBy: t.approvedBy, takenAt: t.takenAt });
+      }
       case "log_decision": {
-        l.append({ actor: ai, aiInUse: o.agentName, action: "decision", target: a.topic ? String(a.topic) : undefined, summary: String(a.decision), source: "mcp" });
+        l.append({ actor: ai, aiInUse: o.agentName, action: "decision", target: a.topic ? String(a.topic) : undefined, summary: String(a.decision), source: "mcp", rationale: rationaleFor(l, o.agentName, a.why ? String(a.why) : undefined) });
         return text("recorded");
       }
       default: return text(`unknown tool ${name}`, true);
@@ -94,7 +111,7 @@ export function handle(o: McpOptions, msg: Json): Json | null {
   if (id === undefined) return null; // notification (initialized, cancelled, ...)
   switch (msg.method) {
     case "initialize":
-      return ok({ protocolVersion: typeof msg.params?.protocolVersion === "string" ? msg.params.protocolVersion : PROTOCOL, capabilities: { tools: {}, resources: {} }, serverInfo: { name: "handoff-ledger", version: "0.2.0" }, instructions: "Call get_brief at the start of every session and get_guardrails before acting. Use check_action before risky commands or deletions, and log_decision for choices the next AI must keep." });
+      return ok({ protocolVersion: typeof msg.params?.protocolVersion === "string" ? msg.params.protocolVersion : PROTOCOL, capabilities: { tools: {}, resources: {} }, serverInfo: { name: "handoff-ledger", version: "0.2.0" }, instructions: "Call get_brief at the start of every session and get_guardrails before acting. Use check_action before risky commands or deletions, and log_decision for choices the next AI must keep. This project records WHY each action happened: call log_reason before a piece of work, or pass `why` to check_action, so your actions are not logged as unexplained. my_task tells you which approved task you are working under." });
     case "ping": return ok({});
     case "tools/list": return ok({ tools: TOOLS });
     case "tools/call": return ok(callTool(o, String(msg.params?.name), (msg.params?.arguments ?? {}) as Json));
