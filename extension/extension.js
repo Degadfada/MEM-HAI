@@ -22,8 +22,8 @@ const savedByHuman = new Map(); // path -> ts
 async function loadCore(ctx) {
   const dir = path.join(ctx.extensionPath, "core");
   const imp = (f) => import(pathToFileURL(path.join(dir, f)).href);
-  const [l, h, v, s, g, sc, pr, st, kn, se] = await Promise.all([imp("ledger.js"), imp("handoff.js"), imp("verify.js"), imp("server.js"), imp("guardrails.js"), imp("scope.js"), imp("providers.js"), imp("steward.js"), imp("knowledge.js"), imp("sessions.js")]);
-  return { dayIndex: se.dayIndex, dayReport: se.dayReport, humanDuration: se.humanDuration, localDay: se.localDay, Registry: pr.Registry, dispatch: st.dispatch, review: st.review, KnowledgeStore: kn.KnowledgeStore, addGuardrail: g.addGuardrail, openContract: sc.openContract, liveContracts: sc.liveContracts, audit: sc.audit, Ledger: l.Ledger, makeBrief: h.makeBrief, FILENAME: h.FILENAME, buildVerifiedBrief: v.buildVerifiedBrief, startServer: s.startServer };
+  const [l, h, v, s, g, sc, pr, st, kn, se, pj] = await Promise.all([imp("ledger.js"), imp("handoff.js"), imp("verify.js"), imp("server.js"), imp("guardrails.js"), imp("scope.js"), imp("providers.js"), imp("steward.js"), imp("knowledge.js"), imp("sessions.js"), imp("projects.js")]);
+  return { Projects: pj.Projects, dayIndex: se.dayIndex, dayReport: se.dayReport, humanDuration: se.humanDuration, localDay: se.localDay, Registry: pr.Registry, dispatch: st.dispatch, review: st.review, KnowledgeStore: kn.KnowledgeStore, addGuardrail: g.addGuardrail, openContract: sc.openContract, liveContracts: sc.liveContracts, audit: sc.audit, Ledger: l.Ledger, makeBrief: h.makeBrief, FILENAME: h.FILENAME, buildVerifiedBrief: v.buildVerifiedBrief, startServer: s.startServer };
 }
 
 const cfg = () => vscode.workspace.getConfiguration("handoff");
@@ -257,6 +257,23 @@ function installMcp(ctx) {
   vscode.window.showInformationMessage("MCP server registered for this workspace (.mcp.json for Claude Code, .vscode/mcp.json for VS Code agent mode). Reload the window to pick it up.");
 }
 
+/**
+ * Put this folder on the machine-wide project list, so the dashboard can show every project that has
+ * memory without you running a command for each one. Idempotent, and never fatal: a name clash or an
+ * unwritable home should not stop the extension from loading.
+ */
+function autoRegisterProject() {
+  try {
+    const P = new core.Projects(homeDir());
+    if (P.list.some((p) => p.root === root)) return;
+    // Project names are lowercase letters, digits, - and _ only.
+    const base = path.basename(root).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "project";
+    let name = base;
+    for (let i = 2; P.list.some((p) => p.name === name); i++) name = base + "-" + i;
+    P.add(name, root);
+  } catch (e) { console.error("handoff: could not register project:", e && e.message); }
+}
+
 async function showHistory() {
   const l = open();
   const days = core.dayIndex(l.all());
@@ -368,6 +385,7 @@ async function activate(ctx) {
   reg("handoff.dispatchTask", dispatchTask);
   reg("handoff.reviewProject", reviewProject);
   reg("handoff.installMcp", () => installMcp(ctx));
+  autoRegisterProject();
   reg("handoff.showHistory", showHistory);
   reg("handoff.openDashboard", openDashboard);
   reg("handoff.installClaudeHook", () => installClaudeHook(ctx));
@@ -387,7 +405,7 @@ async function activate(ctx) {
     ctx.subscriptions.push(w);
   }
   ctx.subscriptions.push({ dispose: () => dash && dash.close() }, statusItem);
-  return { _test: { logFileEvent, attributeUnclaimed, showHistory, currentAi, switchAi, installClaudeHook, openDashboard } };
+  return { _test: { logFileEvent, attributeUnclaimed, showHistory, autoRegisterProject, currentAi, switchAi, installClaudeHook, openDashboard } };
 }
 
 function deactivate() { if (dash) return dash.close(); }

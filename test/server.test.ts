@@ -69,11 +69,11 @@ test("/api/switch logs the switch, returns a verified brief and writes the file"
 });
 
 test("reverse via API turns an event into a struck-through undo", async () => {
-  const ev: any[] = await (await call("/api/events?limit=5")).json();
-  const target = ev.find((e) => e.action === "decision" && !e.reversed)!;
+  const page: any = await (await call("/api/events?limit=5")).json();
+  const target = page.events.find((e: any) => e.action === "decision" && !e.reversed)!;
   await call("/api/reverse", { method: "POST", body: JSON.stringify({ id: target.id }) });
-  const again: any[] = await (await call("/api/events?limit=10")).json();
-  assert.equal(again.find((e) => e.id === target.id).reversed, true);
+  const again: any = await (await call("/api/events?limit=10")).json();
+  assert.equal(again.events.find((e: any) => e.id === target.id).reversed, true);
 });
 
 test("brief endpoint validates target", async () => {

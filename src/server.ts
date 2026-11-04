@@ -17,6 +17,8 @@ import { Projects, ledgerPathFor } from "./projects.ts";
 import { Sessions, checkPassword, cookieOf, hasPassword, makeThrottle } from "./auth.ts";
 import { defaultHome } from "./guardrails.ts";
 import { dayIndex, dayReport, eventsOn, sessionize } from "./sessions.ts";
+import { findExchange } from "./exchange.ts";
+import { ledgerPathFor as ledgerFor } from "./projects.ts";
 
 export interface ServerOptions {
   ledgerPath: string;
@@ -39,7 +41,7 @@ export interface RunningServer {
 const TARGETS = ["claude-md", "agents-md", "system-prompt", "mcp-json"] as const;
 const MAX_BODY = 256 * 1024;
 /** What a logged-in REMOTE user may write. All of it tightens or queues; nothing loosens control or touches files. */
-const REMOTE_WRITES = new Set(["/api/dispatch", "/api/guardrails", "/api/contracts", "/api/logout"]);
+const REMOTE_WRITES = new Set(["/api/dispatch", "/api/guardrails", "/api/contracts", "/api/logout", "/api/why"]);
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((ok, fail) => {
@@ -147,7 +149,14 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       }
       // --- history: time travel. All read-only.
       if (req.method === "GET" && url.pathname === "/api/days") {
-        return send(200, dayIndex(fresh.all()));
+        const all = dayIndex(fresh.all()); // already newest-first
+        const limit = Math.min(365, Math.max(1, Number(url.searchParams.get("limit") ?? 60)));
+        const before = url.searchParams.get("before");
+        const from = before ? all.findIndex((d) => d.date < before) : 0;
+        const start = from < 0 ? all.length : from;
+        const page = all.slice(start, start + limit);
+        const next = all[start + limit]?.date ?? null;
+        return send(200, { days: page, nextBefore: next, total: all.length });
       }
       if (req.method === "GET" && url.pathname === "/api/day") {
         const date = url.searchParams.get("date") ?? "";
@@ -177,9 +186,74 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         }));
       }
       if (req.method === "GET" && url.pathname === "/api/events") {
-        const limit = Math.min(500, Number(url.searchParams.get("limit") ?? 100));
-        const ev = fresh.all().slice(-limit).reverse().map((e) => ({ ...e, reversed: fresh.isReversed(e.id) }));
-        return send(200, ev);
+        // Keyset pagination on seq, not offset: the ledger only ever grows, so an offset would
+        // slide under the reader between pages. `before` walks backwards to seq 0.
+        const all = fresh.all();
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") ?? 100)));
+        const beforeRaw = url.searchParams.get("before");
+        const before = beforeRaw === null || beforeRaw === "" ? Infinity : Number(beforeRaw);
+        if (!Number.isFinite(before) && before !== Infinity) return send(400, { error: "before must be a number" });
+
+        const who = url.searchParams.get("actor");
+        const act = url.searchParams.get("action");
+        const prov = url.searchParams.get("provenance");
+
+        const page: any[] = [];
+        let nextBefore: number | null = null;
+        for (let i = all.length - 1; i >= 0; i--) {
+          const e = all[i]!;
+          if (e.seq >= before) continue;
+          if (who && e.actor.name !== who) continue;
+          if (act && e.action !== act) continue;
+          if (prov && (e.rationale?.provenance ?? "absent") !== prov) continue;
+          if (page.length === limit) { nextBefore = e.seq + 1; break; }
+          page.push({ ...e, reversed: fresh.isReversed(e.id) });
+        }
+        return send(200, { events: page, nextBefore, total: all.length, oldestSeq: all.length ? all[0]!.seq : null });
+      }
+      if (req.method === "GET" && url.pathname === "/api/event") {
+        const id = url.searchParams.get("id") ?? "";
+        const e = fresh.get(id);
+        if (!e) return send(404, { error: "no such event" });
+        // Resolve the citation so the untruncated original is one click away.
+        const hash = e.rationale?.ref?.exchangeSha256;
+        const exchange = hash ? findExchange(home, hash) : undefined;
+        return send(200, { ...e, reversed: fresh.isReversed(e.id), exchange: exchange ?? null });
+      }
+      if (req.method === "GET" && url.pathname === "/api/why") {
+        // The backlog: actions with nothing on record explaining them.
+        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") ?? 100)));
+        const beforeRaw = url.searchParams.get("before");
+        const before = beforeRaw === null || beforeRaw === "" ? Infinity : Number(beforeRaw);
+        const all = fresh.all();
+        const page: any[] = [];
+        let nextBefore: number | null = null;
+        let unexplained = 0;
+        for (let i = all.length - 1; i >= 0; i--) {
+          const e = all[i]!;
+          const bare = !e.rationale || e.rationale.provenance === "absent";
+          if (!bare) continue;
+          unexplained++;
+          if (e.seq >= before) continue;
+          if (page.length >= limit) { if (nextBefore === null) nextBefore = e.seq + 1; continue; }
+          page.push({ ...e, reversed: fresh.isReversed(e.id) });
+        }
+        return send(200, { events: page, nextBefore, unexplained, total: all.length });
+      }
+      if (req.method === "POST" && url.pathname === "/api/why") {
+        // Annotating an unexplained action. It is a new event citing the old one: the log is
+        // append-only, so a reason added later is itself part of the record.
+        const b = JSON.parse(await readBody(req));
+        if (!b?.id || !b?.reason) return send(400, { error: "id and reason required" });
+        const target = fresh.get(String(b.id));
+        if (!target) return send(404, { error: "no such event" });
+        const ev = fresh.append({
+          actor: { kind: "human", name: String(b.by ?? "human") },
+          action: "reason.added", target: target.id,
+          summary: String(b.reason), source: "manual",
+          rationale: { provenance: "declared", reason: String(b.reason), approvedBy: String(b.by ?? "human") },
+        });
+        return send(200, { ok: true, id: ev.id });
       }
       if (req.method === "POST" && url.pathname === "/api/events") {
         const input = JSON.parse(await readBody(req)) as EventInput;
@@ -239,7 +313,43 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       if (req.method === "POST" && url.pathname === "/api/queue/approve") return send(200, approveDispatch(fresh, { kind: "human", name: "human" }, (JSON.parse(await readBody(req)) as { id: string }).id));
       if (req.method === "POST" && url.pathname === "/api/queue/finish") return send(200, finishDispatch(fresh, { kind: "human", name: "human" }, (JSON.parse(await readBody(req)) as { id: string }).id));
       if (req.method === "GET" && url.pathname === "/api/review") { const r = review(steward()); return send(200, { text: r.text, suggestions: r.suggestions, audits: r.audits.map((a) => ({ id: a.contract.id, verdict: a.verdict })) }); }
-      if (req.method === "GET" && url.pathname === "/api/projects") { const P = new Projects(home); return send(200, P.list.map((p) => ({ ...p }))); }
+      if (req.method === "GET" && url.pathname === "/api/projects") {
+        const P = new Projects(home);
+        // Enough per project to choose one at a glance: how much is recorded, when it was last
+        // touched, which AIs have worked on it, whether its chain is intact, and -- the health
+        // metric for this whole system -- what share of its actions can say why they happened.
+        const rows = P.list.map((pr) => {
+          const lp = ledgerFor(pr.root);
+          const base = { name: pr.name, root: pr.root, events: 0, lastActivity: null as string | null, days: 0, ais: [] as string[], chain: "missing" as string, explained: 0, unexplained: 0, coverage: 0, openContracts: 0 };
+          try {
+            const pl = new Ledger(lp);
+            const ev = pl.all();
+            const ais = new Set<string>();
+            let explained = 0;
+            for (const e of ev) {
+              if (e.actor.kind === "ai") ais.add(e.actor.name);
+              else if (e.aiInUse) ais.add(e.aiInUse);
+              if (e.rationale && e.rationale.provenance !== "absent") explained++;
+            }
+            const v = Ledger.verify(lp);
+            return {
+              ...base,
+              events: ev.length,
+              lastActivity: ev.length ? ev[ev.length - 1]!.ts : null,
+              days: dayIndex(ev).length,
+              ais: [...ais].sort(),
+              chain: v.ok ? "intact" : `broken: ${v.error ?? "unknown"}`,
+              explained,
+              unexplained: ev.length - explained,
+              coverage: ev.length ? Math.round((explained / ev.length) * 100) : 0,
+              openContracts: liveContracts(pl).length,
+            };
+          } catch (e) {
+            return { ...base, chain: `unreadable: ${(e as Error).message}` };
+          }
+        });
+        return send(200, rows);
+      }
       if (req.method === "GET" && url.pathname === "/api/lessons") return send(200, new Projects(home).lessons());
       if (req.method === "POST" && url.pathname === "/api/consolidate") return send(200, new Projects(home).consolidate());
       if (req.method === "GET" && url.pathname === "/api/knowledge/search") return send(200, new KnowledgeStore(join(home, "knowledge")).search(url.searchParams.get("q") ?? "", 5));
