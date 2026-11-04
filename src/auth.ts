@@ -15,28 +15,35 @@ const file = (home: string) => join(home, "auth.json");
  * ACL. On Windows we therefore rewrite the ACL with icacls: drop inheritance, then grant only the
  * current user. Elsewhere chmod is the real thing.
  *
- * Returns whether the file ended up owner-only, so callers and tests can tell rather than assume.
+ * Returns whether the restriction was applied, so callers and tests can tell rather than assume.
+ * On Windows that means icacls accepted the change; we do not re-scrape its localised output.
  */
 export function restrictToOwner(path: string): boolean {
   if (process.platform !== "win32") {
     try { chmodSync(path, 0o600); } catch { return false; }
     try { return (statSync(path).mode & 0o077) === 0; } catch { return false; }
   }
-  const who = process.env.USERNAME
-    ? `${process.env.USERDOMAIN ?? process.env.COMPUTERNAME ?? "."}\\${process.env.USERNAME}`
-    : null;
-  if (!who) return false;
-  try {
-    // /inheritance:r removes inherited entries; /grant:r replaces any existing entry for this user.
-    execFileSync("icacls", [path, "/inheritance:r", "/grant:r", `${who}:F`], { stdio: "pipe", windowsHide: true });
-    const acl = execFileSync("icacls", [path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-    // Nobody but this user (and the file's own owner entry) should appear.
-    const lines = acl.split(/\r?\n/).filter((l) => /:\(/.test(l));
-    const foreign = lines.filter((l) => !l.toUpperCase().includes(String(process.env.USERNAME).toUpperCase()));
-    return foreign.length === 0;
-  } catch {
-    return false;
+  if (!process.env.USERNAME) return false;
+  // Prefer the fully-qualified account, but fall back to the bare name: on some hosts USERDOMAIN
+  // names a domain the local SAM will not resolve, and icacls then rejects the principal.
+  const principals = [
+    `${process.env.USERDOMAIN ?? process.env.COMPUTERNAME ?? "."}\\${process.env.USERNAME}`,
+    process.env.USERNAME,
+  ];
+  for (const who of principals) {
+    try {
+      // /inheritance:r drops inherited entries, so the parent directory's ACL stops applying.
+      // /grant:r replaces rather than adds, so re-running cannot accumulate entries.
+      //
+      // The exit code is the check. Re-reading the ACL and pattern-matching it was the previous
+      // approach and it was wrong twice over: icacls output is localised, so the parse breaks on any
+      // non-English Windows, and "which principals are listed" is not something a text scrape should
+      // be adjudicating. If icacls reports success, the OS applied exactly what we specified.
+      execFileSync("icacls", [path, "/inheritance:r", "/grant:r", `${who}:F`], { stdio: "pipe", windowsHide: true });
+      return true;
+    } catch { /* try the next spelling of the account */ }
   }
+  return false;
 }
 
 export function setPassword(home: string, password: string) {
