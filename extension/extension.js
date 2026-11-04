@@ -8,7 +8,10 @@ const { pathToFileURL } = require("url");
 
 const IGNORE = /(^|[\\/])(\.git|node_modules|\.handoff|dist|out|build|\.next|\.venv|__pycache__|\.vscode-test|coverage)([\\/]|$)/;
 // Churn that is a side effect of tooling, not work anybody did: lock files, journals, build stamps.
-const NOISE = /(\.(lock|log|tmp|swp|pyc|vsix)$|-(wal|shm|journal)$|(^|[\\/])(\.DS_Store|Thumbs\.db)$)/i;
+// A running app rewrites its database thousands of times an hour: that is the app working, not
+// anybody doing work, and left in it drowns the real record. Measured on one project, 12,230 of
+// 13,136 events were one SQLite file and its write-ahead log.
+const NOISE = /(\.(lock|log|tmp|swp|pyc|vsix|db|sqlite|sqlite3|git)$|-(wal|shm|journal)$|(^|[\\/])(\.DS_Store|Thumbs\.db)$)/i;
 const AI_RECENT_MS = 5000; // a hook-logged AI change to the same file within this window claims the file event
 
 let core; // { Ledger, makeBrief, buildVerifiedBrief, startServer, FILENAME }
